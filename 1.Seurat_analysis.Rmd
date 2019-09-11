@@ -1,0 +1,582 @@
+---
+title: "Ltb ko and wt 10x scRNA-seq data analysis"
+author: "Jian Zhang (zhang.jian@yale.edu)"
+date: "`r format(Sys.Date())`"
+output: 
+  html_notebook: 
+    code_folding: hide
+  github_document: default
+---
+
+Using [Seurat (V3.1)](https://satijalab.org/seurat/) integration procedure to address three main goals: (1) Identify cell types that are present in both wt and ko datasets; (2) Obtain cell type markers that are conserved in both wt and ko; (3) Compare the datasets to find cell-type specific differential expressed genes across conditions for each cluster.
+```{r}
+library(ggplot2)
+library(Matrix)
+library(dplyr)
+library(Seurat)
+library(cowplot)
+library(sctransform)
+library(ccRemover)
+library(DoubletFinder)
+library(org.Mm.eg.db)
+library(GO.db)
+library(clusterProfiler)
+library(enrichplot)
+library(fgsea)
+library(DOSE)
+```
+Data cleaning, normalization and scaling. The concatenated gene-cell barcode matrix was imported into Seurat v3.0.2 (Macosko et al., 2015), a toolkit for single-cell RNA-seq data analysis, for data processing. To exclude genes that might be detected from random noise, we filtered genes whose expression was detected in fewer than 5 cells. 
+```{r}
+# loading data
+WT.data=Read10X(data.dir = "Ltb_wt_filtered_feature_bc_matrix/")
+WT=CreateSeuratObject(counts = WT.data, project = "wt",min.cells = 5)
+WT$stim <- "wt"
+WT[["percent.mt"]] <- PercentageFeatureSet(object = WT, pattern = "^MT-")
+VlnPlot(WT, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+```{r}
+KO.data=Read10X(data.dir = "Ltb_ko_filtered_feature_bc_matrix/")
+KO=CreateSeuratObject(counts = KO.data, project = "ko", min.cells = 5)
+KO$stim <- "ko"
+KO[["percent.mt"]] <- PercentageFeatureSet(object = KO, pattern = "^MT-")
+VlnPlot(KO, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+To exclude poor quality cells that might result from multiplets or other technical noise, we filtered cells that were considered outliers (> third quartile + 1.5× interquartile range or < first quartile - 1.5× interquartile range) based on the number of expressed genes detected, the sum of UMI counts and the proportion of mitochondrial genes. In addition, we limited the proportion of mitochondrial genes to a maximum of 0.05 to further remove potential poor-quality data from broken cells.
+```{r}
+#filtering (outlierFinder)
+outlierFinder <- function(data){
+  lowerq = quantile(data)[2]
+  upperq = quantile(data)[4]
+  iqr = upperq - lowerq
+  mild.threshold.upper = (iqr * 1.5) + upperq
+  mild.threshold.lower = lowerq - (iqr * 1.5)
+  return(c(mild.threshold.lower,mild.threshold.upper))
+}
+gene <- outlierFinder(WT@meta.data$nFeature_RNA)
+umi <- outlierFinder(WT@meta.data$nCount_RNA)
+mt_pc <- outlierFinder(WT@meta.data$percent.mt)
+WT=subset(x = WT, subset = nFeature_RNA > gene[1] & nFeature_RNA < gene[2] & nCount_RNA > umi[1] & nCount_RNA < umi[2] & percent.mt < 5)
+
+gene <- outlierFinder(KO@meta.data$nFeature_RNA)
+umi <- outlierFinder(KO@meta.data$nCount_RNA)
+mt_pc <- outlierFinder(KO@meta.data$percent.mt)
+KO=subset(x = KO, subset = nFeature_RNA > gene[1] & nFeature_RNA < gene[2] & nCount_RNA > umi[1] & nCount_RNA < umi[2] & percent.mt < 5)
+
+p1 <- VlnPlot(WT, features = "nFeature_RNA") + NoLegend()
+p2 <- VlnPlot(KO, features = "nFeature_RNA") + NoLegend()
+#CombinePlots(plots = list(p1,p2))
+plot_grid(p1,p2)
+```
+Normalizing the data： After removing unwanted cells from the dataset, the next step is to normalize the data. By default, we employ a global-scaling normalization method “LogNormalize” that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result.
+```{r}
+# Performing log-normalization
+WT <- NormalizeData(object = WT, normalization.method = "LogNormalize", scale.factor = 1e4)
+WT_normalized_count <- WT[["RNA"]]@data
+KO <- NormalizeData(object = KO, normalization.method = "LogNormalize", scale.factor = 1e4)
+KO_normalized_count <- KO[["RNA"]]@data
+```
+Characteristics of scRNA-seq: density plot of number of expressed genes.
+```{r}
+d1=density(KO@meta.data[,"nFeature_RNA"])
+d2=density(WT@meta.data[,"nFeature_RNA"])
+plot(d2,col="blue",main="",lwd=2,xlab="number of expressed genes",ylab="Density (fraction of cells)")
+lines(d1,col="red",lwd=2)
+legend_name <- c(paste(names(table(WT$stim))," (",ncol(WT)," cells)",sep = ""),
+                 paste(names(table(KO$stim))," (",ncol(KO)," cells)",sep = ""))
+legend("topright",legend_name,col=c("blue","red"),lty=1,cex=1.5,bty="o")
+```
+Scatter plot of mean expression bewteen wt and ko.
+```{r}
+WT_mean_expression=rowMeans(WT_normalized_count)
+KO_mean_expression=rowMeans(KO_normalized_count)
+overlap_gene=intersect(names(WT_mean_expression),names(KO_mean_expression))
+smoothScatter(WT_mean_expression[overlap_gene],
+              KO_mean_expression[overlap_gene],
+              pch=20,cex=0.5,
+              colramp = colorRampPalette(c("white",blues9,"yellow", "red")),
+              xlab="log mean normalized read counts (wt)",
+              ylab="log mean normalized read counts (ko)")
+cor.test(WT_mean_expression[overlap_gene],KO_mean_expression[overlap_gene],method = "spearman")
+mtext("spearman correlation coefficient 0.995",side=3,line=0.3,font = 1)
+```
+Boxplot of target gene's normalized expression level.
+```{r}
+boxplot(KO_normalized_count["Ltb",],WT_normalized_count["Ltb",],names=c("ko","wt"),varwidth = T,notch = T,col=c("red","blue"),ylab="log normalized read counts",main="Ltb")
+```
+```{r}
+keep <- KO_normalized_count["Ltb",] > 0
+KO_Ltb_cell = KO_normalized_count["Ltb",][keep]
+length(KO_Ltb_cell)
+
+keep <- WT_normalized_count["Ltb",] > 0
+WT_Ltb_cell = WT_normalized_count["Ltb",][keep]
+length(WT_Ltb_cell)
+```
+Density plot of target gene's normalized expression level.
+```{r}
+d1=density(WT_normalized_count["Ltb",])
+d2=density(KO_normalized_count["Ltb",])
+x1=max(d1[["x"]])
+x2=max(d2[["x"]])
+x3=min(d1[["x"]])
+x4=min(d2[["x"]])
+xmax=round(max(x1,x2))+1
+xmin=round(min(x3,x4))-1
+y1=max(d1[["y"]])
+y2=max(d2[["y"]])
+y=round(max(y1,y2))+1
+plot(d1,col="blue",main="Ltb",xlim=c(xmin,xmax),ylim=c(0,y),lwd=2,xlab="log normalized read counts",ylab="Density (fraction of cells)")  #
+lines(d2,col="red",lwd=2)
+legend_name <- c("wt","ko")
+legend("topright",legend_name,col=c("blue","red"),lty=1,cex=1,bty="o")
+```
+
+```{r}
+# Identification of highly variable features (feature selection).
+WT <- FindVariableFeatures(object = WT,selection.method = 'vst', nfeatures = 3000)
+KO <- FindVariableFeatures(object = KO,selection.method = 'vst', nfeatures = 3000)
+# Perform RenameCells
+WT <- RenameCells(object = WT, add.cell.id = "wt")
+KO <- RenameCells(object = KO, add.cell.id = "ko")
+# Assign Cell-Cycle Scores
+WT <- CellCycleScoring(object=WT, s.features=cc.genes$s.genes, g2m.features=cc.genes$g2m.genes, set.ident = TRUE)
+KO <- CellCycleScoring(object=KO, s.features=cc.genes$s.genes, g2m.features=cc.genes$g2m.genes, set.ident = TRUE)
+# run ALRA on Seurat objects, which aims to recover missing values in scRNA-seq data through imputation
+# WT <- RunALRA(WT)
+# KO <- RunALRA(KO)
+```
+```{r}
+cc.genes$s.genes
+```
+```{r}
+cc.genes$g2m.genes
+```
+```{r}
+head(WT@meta.data)
+```
+```{r}
+head(KO@meta.data)
+```
+
+## Perform an integrated analysis with default setting.
+```{r}
+SRF.anchors <- FindIntegrationAnchors(object.list = list(WT, KO), dims = 1:20)
+```
+
+```{r}
+# Perform integration
+SRF.combined <- IntegrateData(anchorset = SRF.anchors, dims = 1:20)
+# Perform an integrated analysis 
+DefaultAssay(SRF.combined) <- "integrated"
+# Run the standard workflow for visualization and clustering
+SRF.combined <- ScaleData(SRF.combined, verbose = FALSE)
+SRF.combined <- RunPCA(SRF.combined, npcs = 30, verbose = FALSE)
+# t-SNE and Clustering
+SRF.combined <- RunUMAP(SRF.combined, reduction = "pca", dims = 1:20)
+SRF.combined <- FindNeighbors(SRF.combined, reduction = "pca", dims = 1:20)
+SRF.combined <- FindClusters(SRF.combined, resolution = 0.6)
+```
+```{r}
+# Visualization
+p1 <- DimPlot(SRF.combined, reduction = "umap", label = TRUE)
+p2 <- DimPlot(SRF.combined, reduction = "umap", group.by = "stim")
+plot_grid(p1, p2)
+```
+```{r}
+table(SRF.combined@meta.data$seurat_clusters)
+```
+
+Change ScaleData() parameters.
+The ScaleData function: Shifts the expression of each gene, so that the mean expression across cells is 0; Scales the expression of each gene, so that the variance across cells is 1 (This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate).
+```{r}
+# Perform integration
+SRF.combined <- IntegrateData(anchorset = SRF.anchors, dims = 1:20)
+# Perform an integrated analysis 
+DefaultAssay(SRF.combined) <- "integrated"
+# Run the standard workflow for visualization and clustering
+SRF.combined <- ScaleData(SRF.combined, vars.to.regress = c("nCount_RNA"), verbose = FALSE)
+SRF.combined <- RunPCA(SRF.combined, npcs = 30, verbose = FALSE)
+# t-SNE and Clustering
+SRF.combined <- RunUMAP(SRF.combined, reduction = "pca", dims = 1:20)
+SRF.combined <- FindNeighbors(SRF.combined, reduction = "pca", dims = 1:20)
+SRF.combined <- FindClusters(SRF.combined, resolution = 0.6)
+```
+```{r}
+p1 <- DimPlot(SRF.combined, reduction = "umap", label = TRUE)
+p2 <- DimPlot(SRF.combined, reduction = "umap", group.by = "stim")
+plot_grid(p1, p2)
+```
+
+```{r}
+table(SRF.combined@meta.data$seurat_clusters)
+```
+
+```{r}
+# Build Cluster Tree (must run before this command: DefaultAssay(SRF.combined) <- "RNA")
+SRF.combined = BuildClusterTree(SRF.combined)
+PlotClusterTree(object = SRF.combined)
+```
+
+```{r}
+# clusters Statistics
+p1 <- ggplot(SRF.combined@meta.data, aes(x=seurat_clusters)) +
+  geom_bar() + xlab("") + ylab("Number of cells") + ggtitle("Cluster sizes")
+p2 <- ggplot(SRF.combined@meta.data, aes(x=seurat_clusters, fill=stim)) +
+  geom_bar(position = "fill") + xlab("") + ylab("Fraction of cells") + ggtitle("Sample by cluster") 
+p3 <- ggplot(SRF.combined@meta.data, aes(x=seurat_clusters, fill=Phase)) +
+  geom_bar(position = "fill") + xlab("") + ylab("Fraction of cells") + ggtitle("Cell cycle phase by cluster")
+plot_grid(p1,p2,p3)
+```
+
+## Finding differentially expressed features (cluster biomarkers).
+```{r}
+#method 1 - FindAllMarkers
+DefaultAssay(SRF.combined) <- "RNA"
+# DefaultAssay(SRF.combined) <- "alra"
+cluster.markers <- FindAllMarkers(SRF.combined,
+                                  test.use="bimod",
+                                  only.pos = TRUE,
+                                  min.pct = 0.25,
+                                  logfc.threshold = 0.4, 
+                                  verbose = FALSE)
+```
+
+
+```{r}
+## barplot of cluster markers sta
+table(cluster.markers$cluster)
+barplot(table(cluster.markers$cluster),
+        horiz=F,
+        xlab = "Clusters",
+        ylab = "Number of markers",
+        border = "BLACK")
+table(table(cluster.markers$gene))
+barplot(table(table(cluster.markers$gene)),
+        horiz=F,
+        xlab = "Frequency of markers",
+        ylab = "Number of markers",
+        border = "BLACK")
+```
+
+```{r}
+all.genes <- rownames(x = SRF.combined)
+SRF.combined <- ScaleData(object = SRF.combined, features = all.genes)
+```
+
+```{r}
+# Visualize all markers with Heatmap (this command will require large meory)
+png(file="cluster.markers.heatmap.png",type="cairo",width = 1500, height = 1500)
+DoHeatmap(SRF.combined, features = cluster.markers$gene, size = 10) +
+  NoLegend() +
+  theme(axis.text.y = element_text(size = 0))
+dev.off()
+```
+```{r}
+knitr::include_graphics("cluster.markers.heatmap.png")
+```
+
+```{r}
+# top 20 markers for each cluster
+cluster.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC)
+```
+
+```{r}
+# Visualize top5 markers with Heatmap
+top5 <- cluster.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+# Save the Heatmap to png file with high resulation
+png(file="top5.cluster.markers.heatmap.png",width = 1500, height = 1500)
+DoHeatmap(SRF.combined, features = top5$gene, size = 10) +
+  NoLegend() +
+  theme(axis.text.y = element_text(size = 20))
+dev.off()
+```
+
+```{r}
+knitr::include_graphics("top5.cluster.markers.heatmap.png")
+```
+
+```{r}
+#Visualize top5 markers with DotPlot
+top5_unique <- unique(top5$gene)
+# Save the DotPlot to png file 
+png(file="top5.cluster.markers.DotPlot.png",width = 2400, height = 1000)
+DotPlot(SRF.combined, features = rev(top5_unique), dot.scale = 8,split.by = "stim",cols = c("blue", "red"))+
+  NoLegend() +
+  RotatedAxis() +
+  theme(legend.text = element_text(size = 20),
+        legend.title = element_text(size = 25),
+        axis.text.y = element_text(size = 25),
+        axis.text.x = element_text(size = 25),
+        axis.title = element_text(size = 25))#Rotate X axis text 90 degrees: axis.text.x = element_text(size = 20, angle = 90)
+dev.off()
+```
+```{r}
+knitr::include_graphics("top5.cluster.markers.DotPlot.png")
+```
+
+
+```{r}
+# #FeaturePlot for all cluster.markers
+# for(i in names(table(cluster.markers$cluster))){
+#   cluster.i.markers <- cluster.markers[cluster.markers$cluster == i,]$gene
+#   y=paste("cluster.",i,".markers",sep = "")
+#   write.table(cluster.markers[cluster.markers$cluster == i,], file = paste(y,".csv",sep = ""))
+#   write.table(cluster.i.markers, file = paste(y,".list",sep = ""))
+#   dir.create(y)
+#   for (gene in cluster.i.markers){
+#     png(file=paste(y,"/",gene,".FeaturePlot.png",sep = ""),width = 600, height = 600)
+#     a=FeaturePlot(SRF.combined,
+#                   features = gene,
+#                   reduction = "umap",
+#                   cols=c("lightgrey","red"),
+#                   label = TRUE,
+#                   label.size = 10) +
+#       theme(legend.text = element_text(size = 20),
+#             legend.title = element_text(size = 15),
+#             axis.text.y = element_text(size = 25),
+#             axis.text.x = element_text(size = 25),
+#             axis.title = element_text(size = 25),
+#             plot.title = element_text(size = 25))
+#     print(a)
+#     dev.off()
+#   }
+# }
+png(file="known.markers.png",width = 1200, height = 1500)
+FeaturePlot(SRF.combined,
+            features = c("Cd34","Cd48","Procr","Trpc6","Ccl9","Clec12a","Tyrobp","Hba-a1","Smim1","Gata1","Mpl","Hoxb5","Fgd5"),
+            reduction = "umap",
+            cols=c("lightgrey","red"),
+            label = TRUE,
+            ncol = 3)
+dev.off()
+```
+```{r}
+knitr::include_graphics("known.markers.png")
+```
+
+Perform a GO analysis of the cell type specific genes
+```{r}
+# Run full GO enrichment test
+formula_res <- compareCluster(
+  gene~cluster,
+  data=cluster.markers,
+  fun="enrichGO",
+  OrgDb="org.Mm.eg.db",
+  keyType = "SYMBOL",
+  ont		   = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.01,
+  qvalueCutoff  = 0.05,
+  universe=all.genes
+)
+# Run GO enrichment test and merge terms that are close to each other to remove result redundancy
+lineage1_ego <- simplify(
+  formula_res,
+  cutoff=0.5,
+  by="p.adjust",
+  select_fun=min
+)
+# Plot both analysis results
+png(file="cluster.markers.GO.BP.enrichment.png",width = 2400, height = 1800)
+dotplot(lineage1_ego, showCategory=3) +
+  theme(legend.text = element_text(size = 20),
+        legend.title = element_text(size = 25),
+        axis.text.x = element_text(size = 25),
+        axis.text.y = element_text(size = 25))
+dev.off()
+```
+```{r}
+knitr::include_graphics("cluster.markers.GO.BP.enrichment.png")
+```
+
+
+```{r}
+saveRDS(WT, file = "WT.rds")
+saveRDS(KO, file = "KO.rds")
+saveRDS(cluster.markers, file = "cluster.markers.rds")
+saveRDS(all.genes, file = "all.genes.rds")
+saveRDS(SRF.combined, file = "SRF.combined.s1.rds")
+```
+
+## Identify differential expressed genes (DEGs) across conditions for each cluster.
+```{r}
+# Perform DEG analysis for different comparisons of interest
+SRF.combined$celltype.stim <- paste(Idents(SRF.combined), SRF.combined$stim, sep = "_")
+SRF.combined$celltype <- Idents(SRF.combined)
+Idents(SRF.combined) <- "celltype.stim"
+DEGs=NULL
+for(i in names(table(SRF.combined@meta.data$seurat_clusters))){
+  cluster.i.DEGs <- FindMarkers(SRF.combined,
+                                ident.1 = paste(i,"_",names(table(WT$stim)),sep = ""),
+                                ident.2 = paste(i,"_",names(table(KO$stim)),sep = ""),
+                                logfc.threshold = 0.4,
+                                test.use = "bimod",
+                                min.pct = 0.25,
+                                verbose = T)
+  # head(cluster.i.DEGs)
+  # length(row.names(cluster.i.DEGs))
+  # y=paste("cluster.",i,".DEGs",sep = "")
+  # write.table(cluster.i.DEGs, file = paste(y,".csv",sep = ""))
+  # write.table(row.names(cluster.i.DEGs), file = paste(y,".list",sep = ""))
+  
+  cluster.i.DEGs$cluster <- as.numeric(i)
+  cluster.i.DEGs$gene <- row.names(cluster.i.DEGs)
+  DEGs=rbind(DEGs,cluster.i.DEGs)
+
+  # dir.create(y)
+  # for (gene in row.names(cluster.i.DEGs)){
+  #   png(file=paste(y,"/",gene,".FeaturePlot.png",sep = ""),type="cairo",width = 1400, height = 1000)
+  #   a=FeaturePlot(SRF.combined,
+  #                 features = gene,
+  #                 reduction = "umap",
+  #                 split.by = "stim",
+  #                 cols=c("lightgrey","red"))
+  #   print(a)
+  #   dev.off()
+  # 
+  #   png(file=paste(y,"/",gene,".VlnPlot.png",sep = ""),type="cairo",width = 1400, height = 1000)
+  #   b=VlnPlot(SRF.combined,
+  #             features = gene,
+  #             split.by = "stim",
+  #             group.by = "celltype",
+  #             pt.size = 0,
+  #             combine = FALSE)
+  #   print(b)
+  #   dev.off()
+  # }
+}
+```
+
+```{r}
+saveRDS(SRF.combined, file = "SRF.combined.s2.rds")
+saveRDS(DEGs, file = "DEGs.rds")
+```
+
+```{r}
+# make a Statistics
+DEGs = readRDS("DEGs.rds")
+# sapply(DEGs,mode)
+# DEGs = transform(DEGs, cluster=as.numeric(cluster))
+table(DEGs$cluster)
+barplot(table(DEGs$cluster),
+        horiz=F,
+        xlab = "Clusters",
+        ylab = "Number of genes",
+        main = "Number of DEGs in each cluster",
+        border = "BLACK")
+
+table(table(DEGs$gene))
+barplot(table(table(DEGs$gene)),
+        horiz=F,
+        xlab = "Frequency of DEGs",
+        ylab = "Number of DEGs",
+        main = "Overlaps of DEGs between clusters",
+        border = "BLACK")
+```
+```{r}
+# top 10 DEGs for each cluster
+DEGs %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+```
+
+```{r}
+# DotPlot Visualization for DEGs_feq >= 2
+DEGs_feq=table(DEGs$gene)
+keep <- DEGs_feq >= 2
+DEGs_feq_new = DEGs_feq[keep]
+
+SRF.combined = readRDS("SRF.combined.s1.rds")
+png(file="DEGs.more.than.2.DotPlot.png",width = 2400, height = 1000)
+DEGs_feq_new = sort(DEGs_feq_new,decreasing = T)
+DotPlot(SRF.combined, features = rev(names(DEGs_feq_new)), dot.scale = 8,split.by = "stim",cols = c("blue", "red"))+
+  NoLegend() +
+  RotatedAxis() +
+  theme(legend.text = element_text(size = 20),
+        legend.title = element_text(size = 25),
+        axis.text.y = element_text(size = 25),
+        axis.text.x = element_text(size = 20),
+        axis.title = element_text(size = 25))
+dev.off()
+```
+```{r}
+knitr::include_graphics("DEGs.more.than.2.DotPlot.png")
+```
+
+```{r}
+FeaturePlot(SRF.combined,
+            features = c("H2-Q6","H2-Q7","Lgals1"),
+            reduction = "umap",
+            split.by = "stim",
+            cols=c("lightgrey","red"),max.cutoff = 3)
+```
+
+```{r}
+plots <- VlnPlot(SRF.combined,
+        features = c("H2-Q7","Ltb"),
+        split.by = "stim",
+        group.by = "celltype",
+        pt.size = 0,
+        combine = FALSE)
+CombinePlots(plots = plots, ncol = 1)
+```
+
+
+GO enrichment for DEGs
+```{r}
+# GO enrichment for DEGs
+formula_res <- compareCluster(
+  gene~cluster,
+  data=DEGs,
+  fun="enrichGO",
+  OrgDb="org.Mm.eg.db",
+  keyType = "SYMBOL",
+  ont		   = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.01,
+  qvalueCutoff  = 0.05,
+  universe=all.genes
+)
+# Run GO enrichment test and merge terms that are close to each other to remove result redundancy
+lineage1_ego <- simplify(
+  formula_res,
+  cutoff=0.5,
+  by="p.adjust",
+  select_fun=min
+)
+# Plot both analysis results
+png(file="DEGs.GO.BP.enrichment.png",width = 2400, height = 1200)
+dotplot(lineage1_ego, showCategory=3) +
+  theme(legend.text = element_text(size = 20),
+        legend.title = element_text(size = 25),
+        axis.text.x = element_text(size = 30),
+        axis.text.y = element_text(size = 30))
+dev.off()
+```
+```{r}
+knitr::include_graphics("DEGs.GO.BP.enrichment.png")
+```
+
+
+KEGG enrichment for DEGs
+```{r}
+# # Perform a KEGG enrichment analysis or GSEA of the DEGs
+# enrichGO and gseGO can use gene symbol directly;
+# but enrichKEGG and GSEA can not use gene symbol directly;
+# must change gene symbol to one of "kegg", 'ncbi-geneid', 'ncib-proteinid' and 'uniprot'
+# columns(org.Mm.eg.db)
+
+DEGs_symbol_to_geneid = mapIds(org.Mm.eg.db, names(DEGs), 'UNIPROT', 'SYMBOL')
+p <- enrichKEGG(unname(DEGs_symbol_to_geneid),
+           organism = "mmu",
+           keyType = "uniprot",
+           pvalueCutoff  = 0.01,
+           pAdjustMethod = "BH",
+           qvalueCutoff = 0.05,
+           minGSSize = 10,
+           maxGSSize = 500)#universe=all.genes,use_internal_data=F
+dotplot(p)
+```
+```{r}
+p
+```
+
