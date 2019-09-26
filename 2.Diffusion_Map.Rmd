@@ -1,0 +1,62 @@
+---
+title: "Diffusion Map Projection"
+author: "Jian Zhang (zhang.jian@yale.edu)"
+date: "`r format(Sys.Date())`"
+output: 
+  html_notebook: 
+    code_folding: hide
+  github_document: default
+---
+
+This is a demonstration of how to project new data sets onto the diffusion map of adult haematopoiesis. This projection is performed in the R programming environment. You will need the *destiny* package installed. This can be downloaded from [Bioconductor](http://bioconductor.org/packages/release/bioc/html/destiny.html).
+
+```{r setup, global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12, 
+                      fig.height=8, 
+                      # fig.path='Figs/',
+                      echo=FALSE, 
+                      warning=FALSE, 
+                      message=FALSE)
+```
+
+
+```{r load_packages, include=FALSE}
+library(destiny)
+library(broman)
+```
+
+The next step is to load the data for the 1,656 blood stem and progenitor cells. These can be downloaded from http://blood.stemcells.cam.ac.uk/single_cell_atlas.html. Rows should be labelled with Ensembl gene IDs and columns with cell names.
+```{r}
+originalExpressionMatrix <- read.table('Nestorowa_Blood_2016/normalisedCountsVariableGenes.txt', header = T, row.names = 1)
+originalExpressionMatrix[1:5,1:5]
+```
+We now perform the diffusion map dimensionality reduction on these data using functions from the destiny package. The log transformation acts as a variance stabilising transformation. Here for simplicity we have used the plot function to plot the diffusion maps. To alter the viewing angle or interactively rotate the 3D plot, packages such as *rgl* and *plot3D* can be used. 
+
+```{r}
+logOriginalExpression <- log2(originalExpressionMatrix + 1)
+dm <- DiffusionMap(t(logOriginalExpression), distance = "cosine", sigma = .16)
+plot(dm, c(3,2,1), pch=20, col="grey")
+```
+
+The diffusion map can be coloured in by features such as cluster ID.
+
+```{r}
+plot(dm, c(3,2,1), pch=20)
+```
+
+
+Next we load and prepare the new data set that we wish to project. Here we are demonstrating projection of the data from [(Grover et al., 2016)](http://www.nature.com/ncomms/2016/160324/ncomms11075/full/ncomms11075.html). The normalised expression matrix for this demonstration can be downloaded from http://blood.stemcells.cam.ac.uk/single_cell_atlas.html, or you can use your own data for projection.
+
+```{r}
+newExpressionMatrix <- read.table('Nestorowa_Blood_2016/grover_expression.txt', header = T)
+```
+
+To perform the projection we require both new and old data to have the same set of genes. Then we can perform the projection using the *dm.predict* function from the *destiny* package.
+
+```{r}
+newExpressionMatrix <- newExpressionMatrix[rownames(originalExpressionMatrix), ]
+logNewExpression <- log2(newExpressionMatrix + 1)
+dmProject <- dm_predict(dm, t(logNewExpression))
+plot(dm, c(3,2,1), col = "grey", new_dcs=dmProject, pch=20, col_new = "red")
+```
+

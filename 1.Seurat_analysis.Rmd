@@ -8,8 +8,22 @@ output:
   github_document: default
 ---
 
+## Overview
+Maintenance of the blood system requires balanced cell fate decisions of haematopoietic stem and progenitor cells (HSPCs). Since cell fate choices are executed at the level of individual cells, new single cell profiling technologies offer exciting possibilities to map the dynamic molecular changes underlying HSPC differentiation.
 Using [Seurat (V3.1)](https://satijalab.org/seurat/) integration procedure to address three main goals: (1) Identify cell types that are present in both wt and ko datasets; (2) Obtain cell type markers that are conserved in both wt and ko; (3) Compare the datasets to find cell-type specific differential expressed genes across conditions for each cluster.
-```{r}
+
+
+```{r setup, global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12, 
+                      fig.height=8, 
+                      # fig.path='Figs/',
+                      echo=FALSE, 
+                      warning=FALSE, 
+                      message=FALSE)
+```
+
+
+```{r load_packages, include=FALSE}
 library(ggplot2)
 library(Matrix)
 library(dplyr)
@@ -25,9 +39,12 @@ library(enrichplot)
 library(fgsea)
 library(DOSE)
 library(tidyverse)
+library(DT)
 ```
+
 Data cleaning, normalization and scaling. The concatenated gene-cell barcode matrix was imported into Seurat v3.0.2 (Macosko et al., 2015), a toolkit for single-cell RNA-seq data analysis, for data processing. To exclude genes that might be detected from random noise, we filtered genes whose expression was detected in fewer than 5 cells. 
-```{r}
+
+```{r warning=FALSE, message=FALSE}
 # loading data
 WT.data=Read10X(data.dir = "Ltb_wt_filtered_feature_bc_matrix/")
 WT=CreateSeuratObject(counts = WT.data, project = "wt",min.cells = 5)
@@ -36,7 +53,7 @@ WT[["percent.mt"]] <- PercentageFeatureSet(object = WT, pattern = "^MT-")
 VlnPlot(WT, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
 ```
 
-```{r}
+```{r warning=FALSE, message=FALSE}
 KO.data=Read10X(data.dir = "Ltb_ko_filtered_feature_bc_matrix/")
 KO=CreateSeuratObject(counts = KO.data, project = "ko", min.cells = 5)
 KO$stim <- "ko"
@@ -70,7 +87,7 @@ p2 <- VlnPlot(KO, features = "nFeature_RNA") + NoLegend()
 plot_grid(p1,p2)
 ```
 Normalizing the data： After removing unwanted cells from the dataset, the next step is to normalize the data. By default, we employ a global-scaling normalization method “LogNormalize” that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result.
-```{r}
+```{r warning=FALSE, message=FALSE}
 # Performing log-normalization
 WT <- NormalizeData(object = WT, normalization.method = "LogNormalize", scale.factor = 1e4)
 WT_normalized_count <- WT[["RNA"]]@data
@@ -88,7 +105,7 @@ legend_name <- c(paste(names(table(WT$stim))," (",ncol(WT)," cells)",sep = ""),
 legend("topright",legend_name,col=c("blue","red"),lty=1,cex=1.5,bty="o")
 ```
 Scatter plot of mean expression bewteen wt and ko.
-```{r}
+```{r warning=FALSE, message=FALSE}
 WT_mean_expression=rowMeans(WT_normalized_count)
 KO_mean_expression=rowMeans(KO_normalized_count)
 overlap_gene=intersect(names(WT_mean_expression),names(KO_mean_expression))
@@ -102,17 +119,17 @@ cor.test(WT_mean_expression[overlap_gene],KO_mean_expression[overlap_gene],metho
 mtext("spearman correlation coefficient 0.995",side=3,line=0.3,font = 1)
 ```
 Boxplot of target gene's normalized expression level.
-```{r}
+```{r warning=FALSE, message=FALSE}
 boxplot(KO_normalized_count["Ltb",],WT_normalized_count["Ltb",],names=c("ko","wt"),varwidth = T,notch = T,col=c("red","blue"),ylab="log normalized read counts",main="Ltb")
 ```
 ```{r}
 keep <- KO_normalized_count["Ltb",] > 0
 KO_Ltb_cell = KO_normalized_count["Ltb",][keep]
-length(KO_Ltb_cell)
+print(paste("Number of ", length(KO_Ltb_cell)," cells express Ltb in Ko",sep = ""))
 
 keep <- WT_normalized_count["Ltb",] > 0
 WT_Ltb_cell = WT_normalized_count["Ltb",][keep]
-length(WT_Ltb_cell)
+print(paste("Number of ", length(WT_Ltb_cell)," cells express Ltb in wt",sep = ""))
 ```
 Density plot of target gene's normalized expression level.
 ```{r}
@@ -133,7 +150,7 @@ legend_name <- c("wt","ko")
 legend("topright",legend_name,col=c("blue","red"),lty=1,cex=1,bty="o")
 ```
 Identification of highly variable features (feature selection); Cell-Cycle Scoring
-```{r}
+```{r warning=FALSE, message=FALSE}
 # Identification of highly variable features (feature selection).
 WT <- FindVariableFeatures(object = WT,selection.method = 'vst', nfeatures = 3000)
 KO <- FindVariableFeatures(object = KO,selection.method = 'vst', nfeatures = 3000)
@@ -161,11 +178,11 @@ head(KO@meta.data)
 ```
 
 ## Perform an integrated analysis with default setting.
-```{r}
+```{r warning=FALSE, message=FALSE}
 SRF.anchors <- FindIntegrationAnchors(object.list = list(WT, KO), dims = 1:20)
 ```
 
-```{r}
+```{r warning=FALSE, message=FALSE}
 # Perform integration
 SRF.combined <- IntegrateData(anchorset = SRF.anchors, dims = 1:20)
 # Perform an integrated analysis 
@@ -178,20 +195,19 @@ SRF.combined <- RunUMAP(SRF.combined, reduction = "pca", dims = 1:20)
 SRF.combined <- FindNeighbors(SRF.combined, reduction = "pca", dims = 1:20)
 SRF.combined <- FindClusters(SRF.combined, resolution = 0.6)
 ```
-```{r}
+```{r warning=FALSE, message=FALSE}
 # Visualization
 p1 <- DimPlot(SRF.combined, reduction = "umap", label = TRUE)
 p2 <- DimPlot(SRF.combined, reduction = "umap", group.by = "stim")
 plot_grid(p1, p2)
 ```
 Number of cells in each cluster
-```{r}
+```{r warning=FALSE, message=FALSE}
 table(SRF.combined@meta.data$seurat_clusters)
 ```
 
-Change ScaleData() parameters.
-The ScaleData function: Shifts the expression of each gene, so that the mean expression across cells is 0; Scales the expression of each gene, so that the variance across cells is 1 (This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate).
-```{r}
+Change ScaleData() parameters. The ScaleData function: Shifts the expression of each gene, so that the mean expression across cells is 0; Scales the expression of each gene, so that the variance across cells is 1 (This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate).
+```{r warning=FALSE, message=FALSE}
 # Perform integration
 SRF.combined <- IntegrateData(anchorset = SRF.anchors, dims = 1:20)
 # Perform an integrated analysis 
@@ -204,7 +220,7 @@ SRF.combined <- RunUMAP(SRF.combined, reduction = "pca", dims = 1:20)
 SRF.combined <- FindNeighbors(SRF.combined, reduction = "pca", dims = 1:20)
 SRF.combined <- FindClusters(SRF.combined, resolution = 0.6)
 ```
-```{r}
+```{r warning=FALSE, message=FALSE}
 p1 <- DimPlot(SRF.combined, reduction = "umap", label = TRUE)
 p2 <- DimPlot(SRF.combined, reduction = "umap", group.by = "stim")
 plot_grid(p1, p2)
@@ -214,7 +230,7 @@ Number of cells in each cluster
 table(SRF.combined@meta.data$seurat_clusters)
 ```
 
-```{r}
+```{r warning=FALSE, message=FALSE}
 # Build Cluster Tree (must run before this command: DefaultAssay(SRF.combined) <- "RNA")
 SRF.combined = BuildClusterTree(SRF.combined)
 PlotClusterTree(object = SRF.combined)
@@ -232,7 +248,7 @@ plot_grid(p1,p2,p3)
 ```
 
 ## Finding differentially expressed features (cluster biomarkers).
-```{r}
+```{r warning=FALSE, message=FALSE}
 #method 1 - FindAllMarkers
 DefaultAssay(SRF.combined) <- "RNA"
 # DefaultAssay(SRF.combined) <- "alra"
@@ -245,7 +261,7 @@ cluster.markers <- FindAllMarkers(SRF.combined,
 ```
 
 
-```{r}
+```{r warning=FALSE, message=FALSE}
 ## barplot of cluster markers sta
 table(cluster.markers$cluster)
 barplot(table(cluster.markers$cluster),
@@ -261,48 +277,43 @@ barplot(table(table(cluster.markers$gene)),
         border = "BLACK")
 ```
 
-```{r}
+```{r warning=FALSE, message=FALSE}
 all.genes <- rownames(x = SRF.combined)
 SRF.combined <- ScaleData(object = SRF.combined, features = all.genes)
 ```
 
 ```{r}
-# Visualize all markers with Heatmap (this command will require large meory)
-png(file="cluster.markers.heatmap.png",type="cairo",width = 1500, height = 1500)
-DoHeatmap(SRF.combined, features = cluster.markers$gene, size = 10) +
-  NoLegend() +
-  theme(axis.text.y = element_text(size = 0))
-dev.off()
-```
-```{r}
-knitr::include_graphics("cluster.markers.heatmap.png")
+# # Visualize all markers with Heatmap (this command will require large meory)
+# png(file="images_and_figures/cluster.markers.heatmap.png",type="cairo",width = 1500, height = 1500)
+# DoHeatmap(SRF.combined, features = cluster.markers$gene, size = 10) +
+#   NoLegend() +
+#   theme(axis.text.y = element_text(size = 0))
+# invisible(dev.off())
+# knitr::include_graphics("images_and_figures/cluster.markers.heatmap.png")
 ```
 
 ```{r}
 # top 20 markers for each cluster
-cluster.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC)
+datatable(cluster.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC),filter="top")
 ```
 
 ```{r}
 # Visualize top5 markers with Heatmap
 top5 <- cluster.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
 # Save the Heatmap to png file with high resulation
-png(file="top5.cluster.markers.heatmap.png",width = 1500, height = 1500)
+png(file="images_and_figures/top5.cluster.markers.heatmap.png",width = 1500, height = 1500)
 DoHeatmap(SRF.combined, features = top5$gene, size = 10) +
   NoLegend() +
   theme(axis.text.y = element_text(size = 20))
-dev.off()
-```
-
-```{r}
-knitr::include_graphics("top5.cluster.markers.heatmap.png")
+invisible(dev.off())
+knitr::include_graphics("images_and_figures/top5.cluster.markers.heatmap.png")
 ```
 
 ```{r}
 #Visualize top5 markers with DotPlot
 top5_unique <- unique(top5$gene)
 # Save the DotPlot to png file 
-png(file="top5.cluster.markers.DotPlot.png",width = 2400, height = 1000)
+png(file="images_and_figures/top5.cluster.markers.DotPlot.png",width = 2400, height = 1000)
 DotPlot(SRF.combined, features = rev(top5_unique), dot.scale = 8,split.by = "stim",cols = c("blue", "red"))+
   NoLegend() +
   RotatedAxis() +
@@ -311,10 +322,8 @@ DotPlot(SRF.combined, features = rev(top5_unique), dot.scale = 8,split.by = "sti
         axis.text.y = element_text(size = 25),
         axis.text.x = element_text(size = 25),
         axis.title = element_text(size = 25))#Rotate X axis text 90 degrees: axis.text.x = element_text(size = 20, angle = 90)
-dev.off()
-```
-```{r}
-knitr::include_graphics("top5.cluster.markers.DotPlot.png")
+invisible(dev.off())
+knitr::include_graphics("images_and_figures/top5.cluster.markers.DotPlot.png")
 ```
 
 Perform a GO analysis of the cell type specific genes
@@ -333,37 +342,44 @@ formula_res <- compareCluster(
   universe=all.genes
 )
 # Run GO enrichment test and merge terms that are close to each other to remove result redundancy
-lineage1_ego <- simplify(
+lineage1_ego <- clusterProfiler::simplify(
   formula_res,
   cutoff=0.5,
   by="p.adjust",
   select_fun=min
 )
 # Plot both analysis results
-png(file="cluster.markers.GO.BP.enrichment.png",width = 2400, height = 1800)
+png(file="images_and_figures/cluster.markers.GO.BP.enrichment.png",width = 2400, height = 1800)
 dotplot(lineage1_ego, showCategory=3) +
   theme(legend.text = element_text(size = 20),
         legend.title = element_text(size = 25),
         axis.text.x = element_text(size = 25),
         axis.text.y = element_text(size = 25))
-dev.off()
-```
-```{r}
-knitr::include_graphics("cluster.markers.GO.BP.enrichment.png")
+invisible(dev.off())
+knitr::include_graphics("images_and_figures/cluster.markers.GO.BP.enrichment.png")
 ```
 
 ## Cell clusters annatation.
 
-1. Known maker gene for mouse hematopoietic stem and progenitor cell [(Nestorowa et al., Blood, 2016)](http://www.bloodjournal.org/content/128/8/e20.long?sso-checked=true#sec-12).
-
+1. Known maker gene for mouse hematopoietic stem and progenitor cell [(Nestorowa et al., Blood, 2016)](http://www.bloodjournal.org/content/128/8/e20). 
+We have used single cell RNA-Seq combined with index sorting to profile 1,656 single HSPCs, where deep sequencing enabled us to detect an average of 6,558 protein-coding genes per cell. The use of broad sorting gates allowed us to retrospectively assign cells to 12 standard populations. Here we present an intuitive web interface as a new community resource, to permit visualization of gene expression in HSPCs at single cell resolution for any gene of choice. To facilitate more advanced datamining, we also provide download links for the full expression data matrix.
+To comprehensively sample cells across the entire spectrum of the mouse HSPC transcriptional landscape, we isolated single cells by using two broad sorting gates based on c-Kit and Sca1 protein expression, encompassing long-term HSCs (LT-HSCs; Lin–c-Kit+Sca1+CD34–Flk2–), lymphoid multipotent progenitors (LMPPs), and multipotent progenitors (MPPs) in one gate called the HSPC gate, and megakaryocyte-erythrocyte progenitors (MEPs), common myeloid progenitors (CMPs), and granulocyte-monocyte progenitors (GMPs) in the second gate called the Progenitor/Prog gate (Figure 1A).
+Single cells were processed for RNA-Seq as described with 156 HSCs, 701 HSPCs, and 799 progenitors passing stringent quality control parameters (see “Methods”). Technical noise analysis revealed 4773 genes with expression variability exceeding technical noise. Unsupervised clustering partitioned the 1656 cells into 4 major clusters (Figure 1B).
+Cluster 1 is mostly made up of LT-HSCs and is represented by genes such as *Procr* (EPCR) and *Trpc6*.
 ```{r}
-knitr::include_graphics("images and figures/F1.large.jpg")
-knitr::include_graphics("images and figures/F2.large.jpg")
-knitr::include_graphics("images and figures/F3.large.jpg")
-
+# knitr::include_graphics("Nestorowa_Blood_2016/F1.large.jpg")
+# knitr::include_graphics("Nestorowa_Blood_2016/F2.large.jpg")
+# knitr::include_graphics("Nestorowa_Blood_2016/F3.large.jpg")
 ```
 
 ```{r}
+cell_types = c("LT-SHC","ST-SHC","MPP1","MPP2","MPP3","LMPP","MEP")
+know_markers = c("Procr, Trpc6","?","?","?","?","?","Hba-a1, Smim1")
+know_markers <- cbind(cell_types,know_markers)
+datatable(know_markers)
+```
+
+```{r warning=FALSE, message=FALSE}
 # #FeaturePlot for all cluster.markers
 # for(i in names(table(cluster.markers$cluster))){
 #   cluster.i.markers <- cluster.markers[cluster.markers$cluster == i,]$gene
@@ -389,30 +405,28 @@ knitr::include_graphics("images and figures/F3.large.jpg")
 #     dev.off()
 #   }
 # }
-png(file="known.markers.png",width = 1200, height = 1500)
+png(file="images_and_figures/known.markers.png",width = 1200, height = 1500)
 FeaturePlot(SRF.combined,
             features = c("Cd34","Cd48","Procr","Trpc6","Ccl9","Clec12a","Tyrobp","Hba-a1","Smim1","Gata1","Mpl","Hoxb5","Fgd5"),
             reduction = "umap",
             cols=c("lightgrey","red"),
             label = TRUE,
             ncol = 3)
-dev.off()
-```
-```{r}
-knitr::include_graphics("known.markers.png")
+invisible(dev.off())
+knitr::include_graphics("images_and_figures/known.markers.png")
 ```
 
 
-```{r}
-saveRDS(WT, file = "WT.rds")
-saveRDS(KO, file = "KO.rds")
-saveRDS(cluster.markers, file = "cluster.markers.rds")
-saveRDS(all.genes, file = "all.genes.rds")
-saveRDS(SRF.combined, file = "SRF.combined.s1.rds")
+```{r warning=FALSE, message=FALSE}
+saveRDS(WT, file = "rds/WT.rds")
+saveRDS(KO, file = "rds/KO.rds")
+saveRDS(cluster.markers, file = "rds/cluster.markers.rds")
+saveRDS(all.genes, file = "rds/all.genes.rds")
+saveRDS(SRF.combined, file = "rds/SRF.combined.s1.rds")
 ```
 
 ## Identify differential expressed genes (DEGs) across conditions for each cluster.
-```{r}
+```{r warning=FALSE, message=FALSE}
 # Perform DEG analysis for different comparisons of interest
 SRF.combined$celltype.stim <- paste(Idents(SRF.combined), SRF.combined$stim, sep = "_")
 SRF.combined$celltype <- Idents(SRF.combined)
@@ -460,14 +474,14 @@ for(i in names(table(SRF.combined@meta.data$seurat_clusters))){
 }
 ```
 
-```{r}
-saveRDS(SRF.combined, file = "SRF.combined.s2.rds")
-saveRDS(DEGs, file = "DEGs.rds")
+```{r warning=FALSE, message=FALSE}
+saveRDS(SRF.combined, file = "rds/SRF.combined.s2.rds")
+saveRDS(DEGs, file = "rds/DEGs.rds")
 ```
 
-```{r}
+```{r warning=FALSE, message=FALSE}
 # make a Statistics
-DEGs = readRDS("DEGs.rds")
+DEGs = readRDS("rds/DEGs.rds")
 # sapply(DEGs,mode)
 # DEGs = transform(DEGs, cluster=as.numeric(cluster))
 table(DEGs$cluster)
@@ -486,19 +500,19 @@ barplot(table(table(DEGs$gene)),
         main = "Overlaps of DEGs between clusters",
         border = "BLACK")
 ```
-```{r}
+```{r warning=FALSE, message=FALSE}
 # top 10 DEGs for each cluster
-DEGs %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+datatable(DEGs %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC),filter="top")
 ```
 
-```{r}
+```{r warning=FALSE, message=FALSE}
 # DotPlot Visualization for DEGs_feq >= 2
 DEGs_feq=table(DEGs$gene)
 keep <- DEGs_feq >= 2
 DEGs_feq_new = DEGs_feq[keep]
 
-SRF.combined = readRDS("SRF.combined.s1.rds")
-png(file="DEGs.more.than.2.DotPlot.png",width = 2400, height = 1000)
+SRF.combined = readRDS("rds/SRF.combined.s1.rds")
+png(file="images_and_figures/DEGs.more.than.2.DotPlot.png",width = 2400, height = 1000)
 DEGs_feq_new = sort(DEGs_feq_new,decreasing = T)
 DotPlot(SRF.combined, features = rev(names(DEGs_feq_new)), dot.scale = 8,split.by = "stim",cols = c("blue", "red"))+
   NoLegend() +
@@ -508,13 +522,12 @@ DotPlot(SRF.combined, features = rev(names(DEGs_feq_new)), dot.scale = 8,split.b
         axis.text.y = element_text(size = 25),
         axis.text.x = element_text(size = 20),
         axis.title = element_text(size = 25))
-dev.off()
-```
-```{r}
-knitr::include_graphics("DEGs.more.than.2.DotPlot.png")
+invisible(dev.off())
+knitr::include_graphics("images_and_figures/DEGs.more.than.2.DotPlot.png")
 ```
 
-```{r}
+```{r warning=FALSE, message=FALSE}
+SRF.combined = readRDS("rds/SRF.combined.s2.rds")
 FeaturePlot(SRF.combined,
             features = c("H2-Q6","H2-Q7","Lgals1"),
             reduction = "umap",
@@ -522,7 +535,7 @@ FeaturePlot(SRF.combined,
             cols=c("lightgrey","red"),max.cutoff = 3)
 ```
 
-```{r}
+```{r warning=FALSE, message=FALSE}
 plots <- VlnPlot(SRF.combined,
         features = c("H2-Q7","Ltb"),
         split.by = "stim",
@@ -534,7 +547,7 @@ CombinePlots(plots = plots, ncol = 1)
 
 
 GO enrichment for DEGs
-```{r}
+```{r warning=FALSE, message=FALSE}
 # GO enrichment for DEGs
 formula_res <- compareCluster(
   gene~cluster,
@@ -549,46 +562,41 @@ formula_res <- compareCluster(
   universe=all.genes
 )
 # Run GO enrichment test and merge terms that are close to each other to remove result redundancy
-lineage1_ego <- simplify(
+lineage1_ego <- clusterProfiler::simplify(
   formula_res,
   cutoff=0.5,
   by="p.adjust",
   select_fun=min
 )
 # Plot both analysis results
-png(file="DEGs.GO.BP.enrichment.png",width = 2400, height = 1200)
+png(file="images_and_figures/DEGs.GO.BP.enrichment.png",width = 2400, height = 1200)
 dotplot(lineage1_ego, showCategory=3) +
   theme(legend.text = element_text(size = 20),
         legend.title = element_text(size = 25),
         axis.text.x = element_text(size = 30),
         axis.text.y = element_text(size = 30))
-dev.off()
-```
-```{r}
-knitr::include_graphics("DEGs.GO.BP.enrichment.png")
+invisible(dev.off())
+knitr::include_graphics("images_and_figures/DEGs.GO.BP.enrichment.png")
 ```
 
 
 KEGG enrichment for DEGs
-```{r}
+```{r warning=FALSE, message=FALSE}
 # # Perform a KEGG enrichment analysis or GSEA of the DEGs
 # enrichGO and gseGO can use gene symbol directly;
 # but enrichKEGG and GSEA can not use gene symbol directly;
 # must change gene symbol to one of "kegg", 'ncbi-geneid', 'ncib-proteinid' and 'uniprot'
 # columns(org.Mm.eg.db)
 
-DEGs_symbol_to_geneid = mapIds(org.Mm.eg.db, names(DEGs), 'UNIPROT', 'SYMBOL')
+DEGs_symbol_to_geneid = mapIds(org.Mm.eg.db, row.names(DEGs), 'UNIPROT', 'SYMBOL')
 p <- enrichKEGG(unname(DEGs_symbol_to_geneid),
            organism = "mmu",
            keyType = "uniprot",
-           pvalueCutoff  = 0.01,
+           pvalueCutoff  = 0.05,
            pAdjustMethod = "BH",
            qvalueCutoff = 0.05,
-           minGSSize = 10,
+           minGSSize = 2,
            maxGSSize = 500)#universe=all.genes,use_internal_data=F
 dotplot(p)
-```
-```{r}
-p
 ```
 
